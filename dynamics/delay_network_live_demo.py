@@ -9,7 +9,7 @@ import inspect
 settings = inspect.getargvalues(
     inspect.stack()[1][0]).locals['self'].settings
 settings.backend = "nengo_brainstorm"
-settings.dt = 0.05
+settings.dt = 0.001
 
 import numpy as np
 from nengolib import Lowpass
@@ -31,14 +31,14 @@ rz = Balanced()(pd, radii=1./(np.arange(len(pd))+1))
 sys = rz.realization
 
 # Compute matrix to transform from state (x) -> sampled window (u)
-t_samples = 10
+t_samples = 50
 C = np.asarray([readout(len(pd), r)
                 for r in np.linspace(0, 1, t_samples)]).dot(rz.T)
 assert C.shape == (t_samples, len(sys))
 
 n_neurons = 128  # per dimension
 tau = 0.018329807108324356  # guess from Terry's notebook
-map_hw = ss2sim(sys, synapse=Lowpass(tau), dt=None)
+map_hw = ss2sim(sys, synapse=Lowpass(tau), dt=None)  #settings.dt)
 assert np.allclose(map_hw.A, tau*sys.A + np.eye(len(sys)))
 assert np.allclose(map_hw.B, tau*sys.B)
 
@@ -46,7 +46,10 @@ syn_probe = Lowpass(tau)
 map_out = ss2sim(sys, synapse=syn_probe, dt=settings.dt)
 
 with nengo.Network() as model:
-    u = nengo.Node(output=0, label='u')
+    u = nengo.Node(
+        output=nengo.processes.WhiteSignal(period=10, high=freq, rms=power, y0=0),
+        #output=0,
+        label='u')
 
     # This is needed because a single node can't connect to multiple
     # different ensembles. We need a separate node for each ensemble.
@@ -55,9 +58,15 @@ with nengo.Network() as model:
           for i in range(len(sys))]
     
     X = []
+    P = []
     for i in range(len(sys)):
         X.append(nengo.Ensemble(
-            n_neurons=n_neurons, dimensions=1, label='X[%d]' % i))
+            n_neurons=n_neurons, dimensions=1, label='X[%d]' % i,
+            neuron_type=nengo.LIFRate()))
+        P.append(nengo.Node(
+            size_in=1, label='P[%d]' % i,
+            output=lambda _, p_i: p_i))
+            #output=lambda _, x_i, a_i=map_out.A[:, i:i+1]: C.dot(a_i.dot(x_i)),))
 
     w = nengo.Node(size_in=t_samples)
     for i in range(len(sys)):
@@ -67,6 +76,8 @@ with nengo.Network() as model:
             nengo.Connection(X[j], X[i], synapse=tau,
                              function=lambda x_j, a_ij=map_hw.A[i, j]: a_ij*x_j)
         
-        nengo.Connection(X[i], w, transform=C.dot(map_out.A[:, i:i+1]),
+        nengo.Connection(X[i], P[i], synapse=None)
+        nengo.Connection(P[i], w, transform=C.dot(map_out.A[:, i:i+1]),
                          synapse=syn_probe)
     nengo.Connection(u, w, transform=C.dot(map_out.B), synapse=syn_probe)
+
